@@ -219,7 +219,7 @@ if (
     # Timeline
     # ----------------------------
 
-    st.subheader("📅 Activity Timeline")
+    st.subheader("📅 Activity Timelines")
 
     st.dataframe(
         df,
