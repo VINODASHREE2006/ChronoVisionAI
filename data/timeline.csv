@@ -1,11 +1,8 @@
-Timestamp,Person,Activity
-00:00:02,Person 1,Entered
-00:00:03,Person 1,Slow Walking
-00:00:04,Person 1,Walking
-00:00:19,Person 1,Exited
-00:00:42,Person 2,Entered
-00:00:43,Person 2,Slow Walking
-00:00:43,Person 2,Shelf Interaction
-00:00:49,Person 3,Entered
-00:00:53,Person 2,Exited
-00:00:53,Person 3,Exited
+Timestamp,Person,Activity,Confidence,Reason
+00:00:01,Person 1,Entered,0.99,First time seen
+00:00:01,Person 1,Standing,0.8,No significant movement
+00:00:02,Person 1,Shelf Interaction,0.71,Dwelling in shelf zone for 21 frames
+00:00:03,Person 1,Picking Product,0.75,Stationary near shelf for 30 frames
+00:00:28,Person 1,Returning Product,0.8,Leaving shelf area slowly
+00:00:28,Person 1,Idle,0.85,Stationary for an extended period
+00:00:35,Person 1,Exited,0.99,Video ended
