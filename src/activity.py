@@ -8,6 +8,8 @@ import numpy as np
 from ultralytics import YOLO
 
 from src import config
+from src.pose import PoseEstimator
+from src.timestamp_ocr import CCTVTimestampExtractor
 from src.timeline import TimelineGenerator
 from src.utils import (
     box_foot_point,
@@ -169,6 +171,7 @@ class ActivityRecognizer:
         foot_y,
         movement_distance,
         box_h,
+        is_picking=False,
     ):
         display_id = int(display_id)
 
@@ -205,6 +208,7 @@ class ActivityRecognizer:
             foot_y,
             norm_move,
             candidate,
+            is_picking,
         )
 
         return self._stabilize(display_id, candidate)
@@ -229,6 +233,8 @@ class ActivityRecognizer:
                 self.missing_frames[display_id] >= config.LOST_FRAMES
                 and self.logged_activity.get(display_id) != "Exited"
             ):
+                # We can't know the exact timestamp of exit easily, so we use a fallback placeholder 
+                # or just the current frame timestamp if we track it. For now we just return the frame_number
                 exit_frame = max(1, frame_number - config.LOST_FRAMES)
                 events.append((exit_frame, display_id, "Exited"))
                 self.logged_activity[display_id] = "Exited"
@@ -260,7 +266,7 @@ class ActivityRecognizer:
             if zone_name != active_zone:
                 counts[zone_name] = 0
 
-    def _apply_zone_logic(self, display_id, foot_x, foot_y, norm_move, candidate):
+    def _apply_zone_logic(self, display_id, foot_x, foot_y, norm_move, candidate, is_picking):
         zone_checks = [
             ("checkout", self.zones["checkout"], "Checkout"),
             ("queue", self.zones["queue"], "Queueing"),
@@ -277,6 +283,9 @@ class ActivityRecognizer:
                         self.shelf_dwell.get(display_id, 0) + 1
                     )
                     self.was_in_shelf[display_id] = True
+
+                    if is_picking:
+                        return "Picking Product"
 
                     if (
                         norm_move <= config.SLOW_WALK_RATIO
@@ -369,6 +378,8 @@ class VideoActivityAnalyzer:
             config.MIN_TRACK_LIFETIME,
             config.LOST_FRAMES,
         )
+        self.timestamp_extractor = CCTVTimestampExtractor(fps=self.fps)
+        self.pose_estimator = PoseEstimator()
         self.output_video_path = self._build_output_path()
         self.track_positions = {}  # display_id -> (foot_x, foot_y, box_h)
 
@@ -434,6 +445,14 @@ class VideoActivityAnalyzer:
                     break
 
                 frame_number += 1
+                
+                # Extract actual timestamp from video frame
+                current_timestamp = self.timestamp_extractor.get_timestamp(frame, frame_number)
+                
+                # Extract pose landmarks
+                pose_results = self.pose_estimator.process_frame(frame)
+                landmarks = self.pose_estimator.extract_landmarks(pose_results, self.width, self.height)
+                
                 active_display_ids = set()
                 active_raw_ids = set()
 
@@ -511,6 +530,9 @@ class VideoActivityAnalyzer:
 
                         self.track_positions[display_id] = (foot_x, foot_y, b_height, frame_number)
 
+                        # Determine if picking product via pose
+                        is_picking = self.pose_estimator.is_picking_product(landmarks)
+
                         activity = self.recognizer.recognize(
                             frame_number,
                             display_id,
@@ -518,10 +540,11 @@ class VideoActivityAnalyzer:
                             foot_y,
                             movement_distance,
                             b_height,
+                            is_picking,
                         )
 
                         if activity:
-                            timeline.add_event(frame_number, display_id, activity)
+                            timeline.add_event(current_timestamp, display_id, activity)
                             latest_activity[display_id] = activity
                             self.recognizer.register_logged_activity(
                                 display_id,
@@ -559,7 +582,8 @@ class VideoActivityAnalyzer:
                         frame_number,
                     )
                 ):
-                    timeline.add_event(exit_frame, display_id, activity)
+                    # We pass current_timestamp for now, though it might be slightly delayed
+                    timeline.add_event(current_timestamp, display_id, activity)
                     latest_activity.pop(display_id, None)
                     self.track_positions.pop(display_id, None)
 
@@ -569,7 +593,8 @@ class VideoActivityAnalyzer:
             for exit_frame, display_id, activity in self.recognizer.finalize_tracks(
                 frame_number
             ):
-                timeline.add_event(exit_frame, display_id, activity)
+                # Pass a generic end timestamp or the last known timestamp
+                timeline.add_event(current_timestamp, display_id, activity)
 
         finally:
             if capture is not None:

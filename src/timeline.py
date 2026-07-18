@@ -30,7 +30,7 @@ class TimelineGenerator:
         self._writer.writerow(self.COLUMNS)
         self._file.flush()
 
-    def add_event(self, frame, person_id, activity):
+    def add_event(self, timestamp, person_id, activity):
         """Add an event only when the activity changes for a person."""
 
         if not activity:
@@ -41,7 +41,7 @@ class TimelineGenerator:
         except (TypeError, ValueError):
             return
 
-        if frame is None or frame < 1:
+        if not timestamp:
             return
 
         if (
@@ -53,7 +53,7 @@ class TimelineGenerator:
         self.last_activity[person_id] = activity
 
         self._writer.writerow([
-            frame_to_time(frame, self.fps),
+            timestamp,
             person_label(person_id),
             str(activity).strip(),
         ])

@@ -2,7 +2,7 @@ Timestamp,Person,Activity
 00:00:02,Person 1,Entered
 00:00:03,Person 1,Slow Walking
 00:00:04,Person 1,Walking
-00:00:07,Person 1,Exited
+00:00:19,Person 1,Exited
 00:00:42,Person 2,Entered
 00:00:43,Person 2,Slow Walking
 00:00:43,Person 2,Shelf Interaction
