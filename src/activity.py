@@ -1,16 +1,20 @@
 import os
 import sys
 
-# Avoid OpenMP runtime conflicts on Windows/Anaconda setups.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
+from src import config
 from src.timeline import TimelineGenerator
 from src.utils import (
+    box_foot_point,
+    box_height,
     calculate_distance,
     ensure_model,
+    filter_detections,
     get_video_properties,
     inside_zone,
     person_label,
@@ -27,153 +31,319 @@ from src.zones import (
 )
 
 
+class PersonIdentityManager:
+    """Map raw tracker IDs to stable sequential Person labels."""
+
+    def __init__(self, reid_distance_ratio, lost_frames):
+        self.reid_distance_ratio = reid_distance_ratio
+        self.lost_frames = lost_frames
+        self.raw_to_display = {}
+        self.next_display_id = 1
+        self.lost_tracks = {}
+
+    def assign(self, raw_id, foot_x, foot_y, box_h, frame_number, confirmed):
+        raw_id = int(raw_id)
+
+        if raw_id in self.raw_to_display:
+            display_id = self.raw_to_display[raw_id]
+            self.lost_tracks.pop(display_id, None)
+            return display_id
+
+        if not confirmed:
+            return None
+
+        display_id = self._match_lost_track(foot_x, foot_y, box_h, frame_number)
+        if display_id is None:
+            display_id = self.next_display_id
+            self.next_display_id += 1
+
+        self.raw_to_display[raw_id] = display_id
+        return display_id
+
+    def mark_missing(self, display_id, foot_x, foot_y, box_h, frame_number):
+        if display_id is None:
+            return
+        self.lost_tracks[display_id] = {
+            "foot_x": foot_x,
+            "foot_y": foot_y,
+            "box_h": box_h,
+            "frame": frame_number,
+        }
+
+    def _match_lost_track(self, foot_x, foot_y, box_h, frame_number):
+        best_id = None
+        best_distance = float("inf")
+
+        for display_id, info in list(self.lost_tracks.items()):
+            if frame_number - info["frame"] > self.lost_frames:
+                del self.lost_tracks[display_id]
+                continue
+
+            threshold = self.reid_distance_ratio * max(box_h, info["box_h"])
+            distance = calculate_distance(
+                info["foot_x"],
+                info["foot_y"],
+                foot_x,
+                foot_y,
+            )
+
+            if distance <= threshold and distance < best_distance:
+                best_distance = distance
+                best_id = display_id
+
+        if best_id is not None:
+            del self.lost_tracks[best_id]
+
+        return best_id
+
+    @property
+    def confirmed_person_count(self):
+        return len(set(self.raw_to_display.values()))
+
+
+class TrackValidator:
+    """Confirm tracks before they become timeline persons."""
+
+    def __init__(self, min_confirm_frames, min_track_lifetime, lost_frames):
+        self.min_confirm_frames = min_confirm_frames
+        self.min_track_lifetime = min_track_lifetime
+        self.lost_frames = lost_frames
+        self.frame_counts = {}
+        self.missing_counts = {}
+        self.confirmed = set()
+        self.valid_lifetime = set()
+
+    def update(self, raw_id, present):
+        raw_id = int(raw_id)
+
+        if present:
+            self.frame_counts[raw_id] = self.frame_counts.get(raw_id, 0) + 1
+            self.missing_counts[raw_id] = 0
+
+            if self.frame_counts[raw_id] >= self.min_confirm_frames:
+                self.confirmed.add(raw_id)
+        else:
+            self.missing_counts[raw_id] = self.missing_counts.get(raw_id, 0) + 1
+
+            if self.missing_counts[raw_id] >= self.lost_frames:
+                if self.frame_counts.get(raw_id, 0) >= self.min_track_lifetime:
+                    self.valid_lifetime.add(raw_id)
+                self.confirmed.discard(raw_id)
+
+    def is_confirmed(self, raw_id):
+        return int(raw_id) in self.confirmed
+
+    def is_valid(self, raw_id):
+        raw_id = int(raw_id)
+        if raw_id in self.valid_lifetime:
+            return True
+        if raw_id in self.confirmed:
+            return True
+        return self.frame_counts.get(raw_id, 0) >= self.min_confirm_frames
+
+
 class ActivityRecognizer:
-    """Rule-based activity inference from movement and zone context."""
+    """Rule-based activity inference with zone dwell and debouncing."""
 
-    RUN_THRESHOLD = 40
-    WALK_THRESHOLD = 25
-    SLOW_WALK_THRESHOLD = 10
-    STABLE_FRAMES = 8
-    WAITING_FRAMES = 45
-    IDLE_FRAMES = 90
-    LOST_FRAMES = 20
-
-    def __init__(self, zones):
+    def __init__(self, zones, fps):
         self.zones = zones
+        self.fps = max(fps, 1)
         self.previous_positions = {}
         self.stable_counts = {}
         self.pending_activity = {}
         self.logged_activity = {}
         self.stationary_frames = {}
-        self.shelf_frames = {}
+        self.zone_dwell = {}
+        self.shelf_dwell = {}
         self.was_in_shelf = {}
-        self.seen_tracks = set()
+        self.seen_display_ids = set()
         self.missing_frames = {}
+        self.smoothed_move = {}
+        self.candidate_history = {}
 
-    def recognize(self, frame_number, track_id, center_x, center_y):
-        track_id = int(track_id)
+    def recognize(
+        self,
+        frame_number,
+        display_id,
+        foot_x,
+        foot_y,
+        movement_distance,
+        box_h,
+    ):
+        display_id = int(display_id)
 
-        if track_id not in self.previous_positions:
-            self.previous_positions[track_id] = (center_x, center_y)
-            self.stable_counts[track_id] = self.STABLE_FRAMES
-            self.pending_activity[track_id] = "Entered"
-            self.stationary_frames[track_id] = 0
-            self.shelf_frames[track_id] = 0
-            self.was_in_shelf[track_id] = False
-            self.seen_tracks.add(track_id)
+        if display_id not in self.previous_positions:
+            self.previous_positions[display_id] = (foot_x, foot_y)
+            self.stable_counts[display_id] = config.STABLE_FRAMES
+            self.pending_activity[display_id] = "Entered"
+            self.stationary_frames[display_id] = 0
+            self.zone_dwell[display_id] = {}
+            self.shelf_dwell[display_id] = 0
+            self.was_in_shelf[display_id] = False
+            self.seen_display_ids.add(display_id)
+            self.smoothed_move[display_id] = 0.0
+            self.candidate_history[display_id] = []
             return "Entered"
 
-        prev_x, prev_y = self.previous_positions[track_id]
-        distance = calculate_distance(prev_x, prev_y, center_x, center_y)
-        self.previous_positions[track_id] = (center_x, center_y)
+        current_norm_move = movement_distance / max(box_h, 1.0)
+        smoothed = self.smoothed_move.get(display_id, current_norm_move)
+        alpha = 0.05
+        norm_move = alpha * current_norm_move + (1 - alpha) * smoothed
+        self.smoothed_move[display_id] = norm_move
 
-        if distance <= self.SLOW_WALK_THRESHOLD:
-            self.stationary_frames[track_id] = (
-                self.stationary_frames.get(track_id, 0) + 1
+        if norm_move <= config.SLOW_WALK_RATIO:
+            self.stationary_frames[display_id] = (
+                self.stationary_frames.get(display_id, 0) + 1
             )
         else:
-            self.stationary_frames[track_id] = 0
+            self.stationary_frames[display_id] = 0
 
-        candidate = self._movement_activity(distance)
+        candidate = self._movement_activity(norm_move)
+        candidate = self._apply_zone_logic(
+            display_id,
+            foot_x,
+            foot_y,
+            norm_move,
+            candidate,
+        )
 
-        if inside_zone(center_x, center_y, self.zones["checkout"]):
-            candidate = "Checkout"
-        elif inside_zone(center_x, center_y, self.zones["queue"]):
-            candidate = "Queueing"
-        elif inside_zone(center_x, center_y, self.zones["shelf"]):
-            self.shelf_frames[track_id] = self.shelf_frames.get(track_id, 0) + 1
-            if distance <= self.SLOW_WALK_THRESHOLD:
-                if self.shelf_frames[track_id] >= self.STABLE_FRAMES:
-                    candidate = "Shelf Interaction"
-                if self.stationary_frames[track_id] >= self.WAITING_FRAMES // 2:
-                    candidate = "Picking Product"
-            else:
-                candidate = "Slow Walking"
-            self.was_in_shelf[track_id] = True
-        elif self.was_in_shelf.get(track_id) and distance <= self.SLOW_WALK_THRESHOLD:
-            candidate = "Returning Product"
-            self.was_in_shelf[track_id] = False
-            self.shelf_frames[track_id] = 0
+        return self._stabilize(display_id, candidate)
 
-        if (
-            candidate in {"Standing", "Slow Walking"}
-            and self.stationary_frames.get(track_id, 0) >= self.WAITING_FRAMES
-        ):
-            candidate = "Waiting"
-        elif (
-            candidate == "Standing"
-            and self.stationary_frames.get(track_id, 0) >= self.IDLE_FRAMES
-        ):
-            candidate = "Idle"
-
-        return self._stabilize(track_id, candidate)
-
-    def register_logged_activity(self, track_id, activity):
-        """Remember the last activity written to the timeline."""
-
+    def register_logged_activity(self, display_id, activity):
         if activity:
-            self.logged_activity[int(track_id)] = activity
+            self.logged_activity[int(display_id)] = activity
 
-    def update_missing_tracks(self, active_track_ids, frame_number):
-        """Mark people as exited after they disappear from tracking."""
-
+    def update_missing_tracks(self, active_display_ids, frame_number):
         events = []
 
-        for track_id in list(self.seen_tracks):
-            if track_id in active_track_ids:
-                self.missing_frames[track_id] = 0
+        for display_id in list(self.seen_display_ids):
+            if display_id in active_display_ids:
+                self.missing_frames[display_id] = 0
                 continue
 
-            self.missing_frames[track_id] = self.missing_frames.get(track_id, 0) + 1
+            self.missing_frames[display_id] = (
+                self.missing_frames.get(display_id, 0) + 1
+            )
 
             if (
-                self.missing_frames[track_id] >= self.LOST_FRAMES
-                and self.logged_activity.get(track_id) != "Exited"
+                self.missing_frames[display_id] >= config.LOST_FRAMES
+                and self.logged_activity.get(display_id) != "Exited"
             ):
-                events.append((frame_number, track_id, "Exited"))
-                self.logged_activity[track_id] = "Exited"
-                self.pending_activity[track_id] = "Exited"
-                self.seen_tracks.discard(track_id)
+                exit_frame = max(1, frame_number - config.LOST_FRAMES)
+                events.append((exit_frame, display_id, "Exited"))
+                self.logged_activity[display_id] = "Exited"
+                self.pending_activity[display_id] = "Exited"
+                self.seen_display_ids.discard(display_id)
 
         return events
 
     def finalize_tracks(self, frame_number):
-        """Mark remaining visible people as exited at video end."""
-
         events = []
 
-        for track_id in list(self.seen_tracks):
-            if self.logged_activity.get(track_id) != "Exited":
-                events.append((frame_number, track_id, "Exited"))
-                self.logged_activity[track_id] = "Exited"
+        for display_id in list(self.seen_display_ids):
+            if self.logged_activity.get(display_id) != "Exited":
+                events.append((frame_number, display_id, "Exited"))
+                self.logged_activity[display_id] = "Exited"
 
-        self.seen_tracks.clear()
+        self.seen_display_ids.clear()
         self.missing_frames.clear()
         return events
 
-    def _movement_activity(self, distance):
-        if distance > self.RUN_THRESHOLD:
+    def _zone_dwell(self, display_id, zone_name):
+        counts = self.zone_dwell.setdefault(display_id, {})
+        counts[zone_name] = counts.get(zone_name, 0) + 1
+        return counts[zone_name]
+
+    def _reset_other_zone_dwell(self, display_id, active_zone):
+        counts = self.zone_dwell.setdefault(display_id, {})
+        for zone_name in list(counts.keys()):
+            if zone_name != active_zone:
+                counts[zone_name] = 0
+
+    def _apply_zone_logic(self, display_id, foot_x, foot_y, norm_move, candidate):
+        zone_checks = [
+            ("checkout", self.zones["checkout"], "Checkout"),
+            ("queue", self.zones["queue"], "Queueing"),
+            ("shelf", self.zones["shelf"], "Shelf Interaction"),
+        ]
+
+        for zone_name, zone, zone_activity in zone_checks:
+            if inside_zone(foot_x, foot_y, zone):
+                dwell = self._zone_dwell(display_id, zone_name)
+                self._reset_other_zone_dwell(display_id, zone_name)
+
+                if zone_name == "shelf":
+                    self.shelf_dwell[display_id] = (
+                        self.shelf_dwell.get(display_id, 0) + 1
+                    )
+                    self.was_in_shelf[display_id] = True
+
+                    if (
+                        norm_move <= config.SLOW_WALK_RATIO
+                        and self.shelf_dwell[display_id] >= config.PICKING_FRAMES
+                    ):
+                        return "Picking Product"
+                    if dwell >= config.ZONE_DWELL_FRAMES:
+                        return "Shelf Interaction"
+                    return candidate
+
+                if zone_name in {"checkout", "queue"} and dwell >= config.ZONE_DWELL_FRAMES:
+                    return zone_activity
+
+                return candidate
+
+        if self.was_in_shelf.get(display_id):
+            self.was_in_shelf[display_id] = False
+            self.shelf_dwell[display_id] = 0
+            if norm_move <= config.SLOW_WALK_RATIO:
+                return "Returning Product"
+
+        self._reset_other_zone_dwell(display_id, None)
+
+        if (
+            candidate == "Standing"
+            and self.stationary_frames.get(display_id, 0) >= config.IDLE_FRAMES
+        ):
+            return "Idle"
+        if (
+            candidate in {"Standing", "Slow Walking"}
+            and self.stationary_frames.get(display_id, 0) >= config.WAITING_FRAMES
+        ):
+            return "Waiting"
+
+        return candidate
+
+    def _movement_activity(self, norm_move):
+        if norm_move > config.RUN_RATIO:
             return "Running"
-        if distance > self.WALK_THRESHOLD:
+        if norm_move > config.WALK_RATIO:
             return "Walking"
-        if distance > self.SLOW_WALK_THRESHOLD:
+        if norm_move > config.SLOW_WALK_RATIO:
             return "Slow Walking"
         return "Standing"
 
-    def _stabilize(self, track_id, candidate):
-        if candidate in {"Entered", "Exited"}:
-            self.pending_activity[track_id] = candidate
-            self.stable_counts[track_id] = self.STABLE_FRAMES
+    def _stabilize(self, display_id, candidate):
+        if candidate in {"Entered", "Exited", "Returning Product"}:
+            if self.logged_activity.get(display_id) == candidate:
+                return None
+            self.pending_activity[display_id] = candidate
+            self.candidate_history.setdefault(display_id, []).clear()
             return candidate
 
-        if self.pending_activity.get(track_id) == candidate:
-            self.stable_counts[track_id] = self.stable_counts.get(track_id, 0) + 1
-        else:
-            self.pending_activity[track_id] = candidate
-            self.stable_counts[track_id] = 1
+        history = self.candidate_history.setdefault(display_id, [])
+        history.append(candidate)
+        if len(history) > config.STABLE_FRAMES:
+            history.pop(0)
 
-        if self.stable_counts[track_id] >= self.STABLE_FRAMES:
-            return candidate
+        if len(history) == config.STABLE_FRAMES:
+            counts = {}
+            for c in history:
+                counts[c] = counts.get(c, 0) + 1
+            most_common = max(counts, key=counts.get)
+            
+            if counts[most_common] >= config.STABLE_FRAMES // 2:
+                self.pending_activity[display_id] = most_common
+                return most_common
 
         return None
 
@@ -181,15 +351,26 @@ class ActivityRecognizer:
 class VideoActivityAnalyzer:
     """End-to-end CCTV analysis pipeline."""
 
-    MODEL_PATH = "models/yolov8n.pt"
-    OUTPUT_DIR = "outputs"
+    OUTPUT_DIR = config.OUTPUT_FOLDER
 
     def __init__(self, video_path):
         self.video_path = video_path
-        self.width, self.height, self.fps = get_video_properties(video_path)
+        self.width, self.height, self.fps, self.frame_count = get_video_properties(
+            video_path
+        )
         self.zones = self._build_zones()
-        self.recognizer = ActivityRecognizer(self.zones)
+        self.recognizer = ActivityRecognizer(self.zones, self.fps)
+        self.identity_manager = PersonIdentityManager(
+            config.REID_DISTANCE_RATIO,
+            config.LOST_FRAMES,
+        )
+        self.track_validator = TrackValidator(
+            config.MIN_CONFIRM_FRAMES,
+            config.MIN_TRACK_LIFETIME,
+            config.LOST_FRAMES,
+        )
         self.output_video_path = self._build_output_path()
+        self.track_positions = {}  # display_id -> (foot_x, foot_y, box_h)
 
     def _build_zones(self):
         return {
@@ -222,14 +403,17 @@ class VideoActivityAnalyzer:
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Unable to read video dimensions.")
 
-        model_path = ensure_model(self.MODEL_PATH)
+        model_path = ensure_model(config.MODEL_PATH, config.MODEL_FALLBACK)
         model = YOLO(model_path)
 
-        timeline = TimelineGenerator(fps=self.fps)
+        timeline = TimelineGenerator(fps=self.fps, output_path=config.TIMELINE_FILE)
         latest_activity = {}
         writer = None
+        capture = None
+        frames_written = 0
 
         try:
+            capture = cv2.VideoCapture(self.video_path)
             writer = cv2.VideoWriter(
                 self.output_video_path,
                 cv2.VideoWriter_fourcc(*"mp4v"),
@@ -242,77 +426,203 @@ class VideoActivityAnalyzer:
                     f"Unable to create annotated video at {self.output_video_path}"
                 )
 
-            results = model.track(
-                source=self.video_path,
-                tracker="bytetrack.yaml",
-                persist=True,
-                stream=True,
-                save=False,
-                classes=[0],
-                conf=0.3,
-                verbose=False,
-            )
-
             frame_number = 0
 
-            for result in results:
+            while True:
+                success, frame = capture.read()
+                if not success:
+                    break
+
                 frame_number += 1
-                frame = result.orig_img.copy()
-                active_track_ids = set()
+                active_display_ids = set()
+                active_raw_ids = set()
 
-                if result.boxes is not None and result.boxes.id is not None:
+                results = model.track(
+                    frame,
+                    persist=True,
+                    tracker=config.TRACKER,
+                    conf=config.CONFIDENCE,
+                    iou=config.IOU,
+                    imgsz=config.INFERENCE_SIZE,
+                    classes=[config.PERSON_CLASS],
+                    verbose=False,
+                )
+
+                result = results[0]
+                annotated = frame.copy()
+
+                if result.boxes is not None and len(result.boxes) > 0:
                     boxes = result.boxes.xyxy.cpu().numpy()
-                    ids = result.boxes.id.cpu().numpy().astype(int)
+                    confidences = result.boxes.conf.cpu().numpy()
+                    track_ids = (
+                        result.boxes.id.cpu().numpy().astype(int)
+                        if result.boxes.id is not None
+                        else np.array([], dtype=int)
+                    )
 
-                    for box, track_id in zip(boxes, ids):
-                        active_track_ids.add(int(track_id))
+                    filtered_boxes, filtered_conf = filter_detections(
+                        boxes,
+                        confidences,
+                        self.width,
+                        self.height,
+                        config,
+                    )
+
+                    for box, conf in zip(filtered_boxes, filtered_conf):
+                        best_track_id = self._match_track_id(box, boxes, track_ids)
+                        if best_track_id is None:
+                            continue
+
+                        raw_id = int(best_track_id)
+                        active_raw_ids.add(raw_id)
+                        self.track_validator.update(raw_id, present=True)
 
                         x1, y1, x2, y2 = map(int, box)
-                        center_x = (x1 + x2) / 2
-                        center_y = (y1 + y2) / 2
+                        foot_x, foot_y = box_foot_point(box)
+                        b_height = box_height(box)
+
+                        confirmed = self.track_validator.is_confirmed(raw_id)
+                        display_id = self.identity_manager.assign(
+                            raw_id,
+                            foot_x,
+                            foot_y,
+                            b_height,
+                            frame_number,
+                            confirmed,
+                        )
+
+                        if display_id is None:
+                            continue
+
+                        active_display_ids.add(display_id)
+
+                        prev = self.track_positions.get(display_id)
+                        if prev is None:
+                            movement_distance = 0.0
+                        else:
+                            frames_elapsed = max(1, frame_number - prev[3])
+                            total_dist = calculate_distance(
+                                prev[0],
+                                prev[1],
+                                foot_x,
+                                foot_y,
+                            )
+                            movement_distance = total_dist / frames_elapsed
+
+                        self.track_positions[display_id] = (foot_x, foot_y, b_height, frame_number)
 
                         activity = self.recognizer.recognize(
                             frame_number,
-                            track_id,
-                            center_x,
-                            center_y,
+                            display_id,
+                            foot_x,
+                            foot_y,
+                            movement_distance,
+                            b_height,
                         )
 
                         if activity:
-                            timeline.add_event(frame_number, track_id, activity)
-                            latest_activity[track_id] = activity
-                            self.recognizer.register_logged_activity(track_id, activity)
+                            timeline.add_event(frame_number, display_id, activity)
+                            latest_activity[display_id] = activity
+                            self.recognizer.register_logged_activity(
+                                display_id,
+                                activity,
+                            )
 
-                        label = latest_activity.get(track_id, "Detected")
-                        self._draw_annotation(frame, x1, y1, x2, y2, track_id, label)
+                        label = latest_activity.get(display_id, "Tracking")
+                        self._draw_annotation(
+                            annotated,
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            display_id,
+                            label,
+                        )
 
-                for exit_frame, track_id, activity in self.recognizer.update_missing_tracks(
-                    active_track_ids,
-                    frame_number,
+                known_raw_ids = set(self.track_validator.frame_counts.keys())
+                for raw_id in known_raw_ids - active_raw_ids:
+                    self.track_validator.update(raw_id, present=False)
+
+                for display_id, position in list(self.track_positions.items()):
+                    if display_id not in active_display_ids:
+                        self.identity_manager.mark_missing(
+                            display_id,
+                            position[0],
+                            position[1],
+                            position[2],
+                            frame_number,
+                        )
+
+                for exit_frame, display_id, activity in (
+                    self.recognizer.update_missing_tracks(
+                        active_display_ids,
+                        frame_number,
+                    )
                 ):
-                    timeline.add_event(exit_frame, track_id, activity)
-                    latest_activity.pop(track_id, None)
+                    timeline.add_event(exit_frame, display_id, activity)
+                    latest_activity.pop(display_id, None)
+                    self.track_positions.pop(display_id, None)
 
-                writer.write(frame)
+                writer.write(annotated)
+                frames_written += 1
 
-            for exit_frame, track_id, activity in self.recognizer.finalize_tracks(
+            for exit_frame, display_id, activity in self.recognizer.finalize_tracks(
                 frame_number
             ):
-                timeline.add_event(exit_frame, track_id, activity)
+                timeline.add_event(exit_frame, display_id, activity)
 
         finally:
+            if capture is not None:
+                capture.release()
             if writer is not None:
                 writer.release()
             timeline.close()
 
+        if frames_written == 0:
+            raise ValueError("No frames were processed from the input video.")
+
+        print(
+            f"Confirmed persons: {self.identity_manager.confirmed_person_count}",
+            flush=True,
+        )
         return self.output_video_path
 
     @staticmethod
-    def _draw_annotation(frame, x1, y1, x2, y2, track_id, activity):
+    def _match_track_id(target_box, all_boxes, track_ids):
+        if len(track_ids) == 0:
+            return None
+
+        best_iou = 0.0
+        best_id = None
+
+        for box, track_id in zip(all_boxes, track_ids):
+            x1 = max(target_box[0], box[0])
+            y1 = max(target_box[1], box[1])
+            x2 = min(target_box[2], box[2])
+            y2 = min(target_box[3], box[3])
+            inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            area_a = max(0.0, target_box[2] - target_box[0]) * max(
+                0.0, target_box[3] - target_box[1]
+            )
+            area_b = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+            union = area_a + area_b - inter
+            iou = inter / union if union > 0 else 0.0
+
+            if iou > best_iou:
+                best_iou = iou
+                best_id = track_id
+
+        if best_iou >= 0.5:
+            return best_id
+
+        return None
+
+    @staticmethod
+    def _draw_annotation(frame, x1, y1, x2, y2, display_id, activity):
         color = (0, 180, 255)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        label = f"{person_label(track_id)} | {activity}"
+        label = f"{person_label(display_id)} | {activity}"
         text_size, _ = cv2.getTextSize(
             label,
             cv2.FONT_HERSHEY_SIMPLEX,

@@ -36,6 +36,14 @@ class TimelineGenerator:
         if not activity:
             return
 
+        try:
+            person_id = int(person_id)
+        except (TypeError, ValueError):
+            return
+
+        if frame is None or frame < 1:
+            return
+
         if (
             person_id in self.last_activity
             and self.last_activity[person_id] == activity
@@ -47,7 +55,7 @@ class TimelineGenerator:
         self._writer.writerow([
             frame_to_time(frame, self.fps),
             person_label(person_id),
-            activity,
+            str(activity).strip(),
         ])
         self._file.flush()
 
