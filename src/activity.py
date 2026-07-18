@@ -3,6 +3,7 @@ import sys
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+import time
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -438,20 +439,32 @@ class VideoActivityAnalyzer:
                 )
 
             frame_number = 0
+            
+            # Profiling accumulators
+            time_read = 0.0
+            time_ocr = 0.0
+            time_infer = 0.0
+            time_track = 0.0
+            time_write = 0.0
+            total_frames = int(self.frame_count) if self.frame_count > 0 else 1
 
             while True:
+                t0 = time.perf_counter()
                 success, frame = capture.read()
                 if not success:
                     break
+                t1 = time.perf_counter()
+                time_read += (t1 - t0)
 
                 frame_number += 1
                 
                 # Extract actual timestamp from video frame
                 current_timestamp = self.timestamp_extractor.get_timestamp(frame, frame_number)
+                t2 = time.perf_counter()
+                time_ocr += (t2 - t1)
                 
-                # Extract pose landmarks
-                pose_results = self.pose_estimator.process_frame(frame)
-                landmarks = self.pose_estimator.extract_landmarks(pose_results, self.width, self.height)
+                # Bypassing Pose Extraction since it's incompatible and saves CPU
+                landmarks = None
                 
                 active_display_ids = set()
                 active_raw_ids = set()
@@ -466,6 +479,8 @@ class VideoActivityAnalyzer:
                     classes=[config.PERSON_CLASS],
                     verbose=False,
                 )
+                t3 = time.perf_counter()
+                time_infer += (t3 - t2)
 
                 result = results[0]
                 annotated = frame.copy()
@@ -587,8 +602,23 @@ class VideoActivityAnalyzer:
                     latest_activity.pop(display_id, None)
                     self.track_positions.pop(display_id, None)
 
+                t4 = time.perf_counter()
+                time_track += (t4 - t3)
+
                 writer.write(annotated)
+                t5 = time.perf_counter()
+                time_write += (t5 - t4)
+                
                 frames_written += 1
+                
+                if frame_number % 50 == 0:
+                    pct = (frame_number / total_frames) * 100
+                    avg_read = (time_read / frame_number) * 1000
+                    avg_ocr = (time_ocr / frame_number) * 1000
+                    avg_infer = (time_infer / frame_number) * 1000
+                    avg_track = (time_track / frame_number) * 1000
+                    avg_write = (time_write / frame_number) * 1000
+                    print(f"Progress: {pct:.1f}% | Latency (ms): Read={avg_read:.1f}, OCR={avg_ocr:.1f}, Infer={avg_infer:.1f}, Track={avg_track:.1f}, Write={avg_write:.1f}", flush=True)
 
             for exit_frame, display_id, activity in self.recognizer.finalize_tracks(
                 frame_number

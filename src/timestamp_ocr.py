@@ -10,6 +10,9 @@ class CCTVTimestampExtractor:
         self.fps = fps
         self.last_valid_time = None
         self.last_frame_number = 0
+        self.ocr_attempts = 0
+        self.max_ocr_attempts = 5
+        self.disable_ocr = False
         # Matches formats like HH:MM:SS, HH.MM.SS, HH;MM;SS
         self.time_pattern = re.compile(r'(\d{1,2})[:\.;](\d{2})[:\.;](\d{2})')
 
@@ -48,13 +51,21 @@ class CCTVTimestampExtractor:
         return None
 
     def get_timestamp(self, frame, frame_number):
+        if self.disable_ocr:
+            return self._fallback_time(frame_number)
+
         # Run OCR every 1 second (fps frames) or if we don't have a valid time yet
         if self.last_valid_time is None or frame_number % int(self.fps) == 0:
+            self.ocr_attempts += 1
             extracted = self._extract_from_image(frame)
             if extracted:
                 self.last_valid_time = extracted
                 self.last_frame_number = frame_number
                 return extracted.strftime("%H:%M:%S")
+            elif self.last_valid_time is None and self.ocr_attempts >= self.max_ocr_attempts:
+                # If we tried 5 times (5 seconds) and never found a timestamp, disable OCR forever!
+                self.disable_ocr = True
+                return self._fallback_time(frame_number)
         
         # If OCR fails or we're in-between OCR checks, interpolate
         if self.last_valid_time is not None:
@@ -63,6 +74,9 @@ class CCTVTimestampExtractor:
             current_time = self.last_valid_time + timedelta(seconds=seconds_elapsed)
             return current_time.strftime("%H:%M:%S")
             
+        return self._fallback_time(frame_number)
+
+    def _fallback_time(self, frame_number):
         # Absolute fallback if we haven't found any timestamp yet
         seconds = int(frame_number / self.fps)
         return f"00:00:{seconds:02d}" if seconds < 60 else f"00:{seconds//60:02d}:{seconds%60:02d}"

@@ -13,7 +13,7 @@ TIMELINE_FILE = "data/timeline.csv"
 PERSON_CLASS = 0
 CONFIDENCE = 0.52
 IOU = 0.5
-INFERENCE_SIZE = 1280
+INFERENCE_SIZE = 640
 
 # Tracking
 TRACKER = "models/bytetrack_chrono.yaml"
