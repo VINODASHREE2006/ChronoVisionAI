@@ -178,14 +178,16 @@ class ActivityRecognizer:
         foot_y,
         movement_distance,
         box_h,
-        is_picking=False,
+        keypoints=None,
     ):
         display_id = int(display_id)
+        confidence = 0.50
+        reason = "Initial state"
 
         if display_id not in self.previous_positions:
             self.previous_positions[display_id] = (foot_x, foot_y)
             self.stable_counts[display_id] = config.STABLE_FRAMES
-            self.pending_activity[display_id] = "Entered"
+            self.pending_activity[display_id] = {"activity": "Entered", "confidence": 0.99, "reason": "First time seen"}
             self.logged_activity.pop(display_id, None)
             self.stationary_frames[display_id] = 0
             self.zone_dwell[display_id] = {}
@@ -194,7 +196,7 @@ class ActivityRecognizer:
             self.seen_display_ids.add(display_id)
             self.smoothed_move[display_id] = 0.0
             self.candidate_history[display_id] = []
-            return "Entered"
+            return self.pending_activity[display_id]
 
         current_norm_move = movement_distance / max(box_h, 1.0)
         smoothed = self.smoothed_move.get(display_id, current_norm_move)
@@ -203,23 +205,34 @@ class ActivityRecognizer:
         self.smoothed_move[display_id] = norm_move
 
         if norm_move <= config.SLOW_WALK_RATIO:
-            self.stationary_frames[display_id] = (
-                self.stationary_frames.get(display_id, 0) + 1
-            )
+            self.stationary_frames[display_id] = self.stationary_frames.get(display_id, 0) + 1
         else:
             self.stationary_frames[display_id] = 0
 
-        candidate = self._movement_activity(norm_move)
-        candidate = self._apply_zone_logic(
+        # Pose Estimation (Arm Movement)
+        is_picking = False
+        if keypoints is not None and len(keypoints) == 17:
+            l_wrist, r_wrist = keypoints[9], keypoints[10]
+            l_hip, r_hip = keypoints[11], keypoints[12]
+            # y is 0 at top, so smaller y means higher. If wrist is 10% of body height above hip:
+            if l_wrist[1] > 0 and l_hip[1] > 0 and l_wrist[1] < l_hip[1] - (box_h * 0.1):
+                is_picking = True
+            if r_wrist[1] > 0 and r_hip[1] > 0 and r_wrist[1] < r_hip[1] - (box_h * 0.1):
+                is_picking = True
+
+        candidate, conf, rsn = self._movement_activity(norm_move)
+        candidate, conf, rsn = self._apply_zone_logic(
             display_id,
             foot_x,
             foot_y,
             norm_move,
             candidate,
+            conf,
+            rsn,
             is_picking,
         )
 
-        return self._stabilize(display_id, candidate)
+        return self._stabilize(display_id, candidate, conf, rsn)
 
     def register_logged_activity(self, display_id, activity):
         if activity:
@@ -242,9 +255,9 @@ class ActivityRecognizer:
                 and self.logged_activity.get(display_id) != "Exited"
             ):
                 exit_frame = max(1, frame_number - config.LOST_FRAMES)
-                events.append((exit_frame, display_id, "Exited"))
+                events.append((exit_frame, display_id, {"activity": "Exited", "confidence": 0.90, "reason": "Track lost completely"}))
                 self.logged_activity[display_id] = "Exited"
-                self.pending_activity[display_id] = "Exited"
+                self.pending_activity[display_id] = {"activity": "Exited", "confidence": 0.90, "reason": "Track lost completely"}
                 self.seen_display_ids.discard(display_id)
                 self.previous_positions.pop(display_id, None)
 
@@ -255,7 +268,7 @@ class ActivityRecognizer:
 
         for display_id in list(self.seen_display_ids):
             if self.logged_activity.get(display_id) != "Exited":
-                events.append((frame_number, display_id, "Exited"))
+                events.append((frame_number, display_id, {"activity": "Exited", "confidence": 0.99, "reason": "Video ended"}))
                 self.logged_activity[display_id] = "Exited"
 
         self.seen_display_ids.clear()
@@ -273,7 +286,7 @@ class ActivityRecognizer:
             if zone_name != active_zone:
                 counts[zone_name] = 0
 
-    def _apply_zone_logic(self, display_id, foot_x, foot_y, norm_move, candidate, is_picking):
+    def _apply_zone_logic(self, display_id, foot_x, foot_y, norm_move, candidate, conf, rsn, is_picking):
         zone_checks = [
             ("checkout", self.zones["checkout"], "Checkout"),
             ("queue", self.zones["queue"], "Queueing"),
@@ -286,80 +299,75 @@ class ActivityRecognizer:
                 self._reset_other_zone_dwell(display_id, zone_name)
 
                 if zone_name == "shelf":
-                    self.shelf_dwell[display_id] = (
-                        self.shelf_dwell.get(display_id, 0) + 1
-                    )
+                    self.shelf_dwell[display_id] = self.shelf_dwell.get(display_id, 0) + 1
                     self.was_in_shelf[display_id] = True
 
                     if is_picking:
-                        return "Picking Product"
+                        return "Picking Product", 0.95, "Arm raised/extended while near shelf"
 
-                    if (
-                        norm_move <= config.SLOW_WALK_RATIO
-                        and self.shelf_dwell[display_id] >= config.PICKING_FRAMES
-                    ):
-                        return "Picking Product"
+                    if norm_move <= config.SLOW_WALK_RATIO and self.shelf_dwell[display_id] >= config.PICKING_FRAMES:
+                        return "Picking Product", 0.75, f"Stationary near shelf for {self.shelf_dwell[display_id]} frames"
+                    
                     if dwell >= config.ZONE_DWELL_FRAMES:
-                        return "Shelf Interaction"
-                    return candidate
+                        return "Shelf Interaction", min(0.9, 0.5 + (dwell/100)), f"Dwelling in shelf zone for {dwell} frames"
+                        
+                    return candidate, conf, rsn
 
                 if zone_name in {"checkout", "queue"} and dwell >= config.ZONE_DWELL_FRAMES:
-                    return zone_activity
+                    return zone_activity, min(0.95, 0.6 + (dwell/100)), f"Dwelling in {zone_name} zone for {dwell} frames"
 
-                return candidate
+                return candidate, conf, rsn
 
         if self.was_in_shelf.get(display_id):
             self.was_in_shelf[display_id] = False
             self.shelf_dwell[display_id] = 0
             if norm_move <= config.SLOW_WALK_RATIO:
-                return "Returning Product"
+                return "Returning Product", 0.80, "Leaving shelf area slowly"
 
         self._reset_other_zone_dwell(display_id, None)
 
-        if (
-            candidate == "Standing"
-            and self.stationary_frames.get(display_id, 0) >= config.IDLE_FRAMES
-        ):
-            return "Idle"
-        if (
-            candidate in {"Standing", "Slow Walking"}
-            and self.stationary_frames.get(display_id, 0) >= config.WAITING_FRAMES
-        ):
-            return "Waiting"
+        if candidate == "Standing" and self.stationary_frames.get(display_id, 0) >= config.IDLE_FRAMES:
+            return "Idle", 0.85, "Stationary for an extended period"
+        if candidate in {"Standing", "Slow Walking"} and self.stationary_frames.get(display_id, 0) >= config.WAITING_FRAMES:
+            return "Waiting", 0.80, "Moving very slowly or stopped"
 
-        return candidate
+        return candidate, conf, rsn
 
     def _movement_activity(self, norm_move):
         if norm_move > config.RUN_RATIO:
-            return "Running"
+            return "Running", min(0.99, norm_move * 10), f"High speed ({norm_move:.3f})"
         if norm_move > config.WALK_RATIO:
-            return "Walking"
+            return "Walking", 0.85, f"Normal speed ({norm_move:.3f})"
         if norm_move > config.SLOW_WALK_RATIO:
-            return "Slow Walking"
-        return "Standing"
+            return "Slow Walking", 0.75, f"Slow speed ({norm_move:.3f})"
+        return "Standing", 0.80, "No significant movement"
 
-    def _stabilize(self, display_id, candidate):
+    def _stabilize(self, display_id, candidate, conf, rsn):
+        cand_dict = {"activity": candidate, "confidence": round(conf, 2), "reason": rsn}
+        
         if candidate in {"Entered", "Exited", "Returning Product"}:
             if self.logged_activity.get(display_id) == candidate:
                 return None
-            self.pending_activity[display_id] = candidate
+            self.pending_activity[display_id] = cand_dict
             self.candidate_history.setdefault(display_id, []).clear()
-            return candidate
+            return cand_dict
 
         history = self.candidate_history.setdefault(display_id, [])
-        history.append(candidate)
+        history.append(cand_dict)
         if len(history) > config.STABLE_FRAMES:
             history.pop(0)
 
         if len(history) == config.STABLE_FRAMES:
             counts = {}
             for c in history:
-                counts[c] = counts.get(c, 0) + 1
+                counts[c["activity"]] = counts.get(c["activity"], 0) + 1
             most_common = max(counts, key=counts.get)
             
             if counts[most_common] >= config.STABLE_FRAMES // 2:
-                self.pending_activity[display_id] = most_common
-                return most_common
+                # Find the highest confidence instance of this activity in history
+                best_instance = max([h for h in history if h["activity"] == most_common], key=lambda x: x["confidence"])
+                self.pending_activity[display_id] = best_instance
+                return best_instance
 
         return None
 
@@ -500,6 +508,11 @@ class VideoActivityAnalyzer:
                         if result.boxes.id is not None
                         else np.array([], dtype=int)
                     )
+                    
+                    # Extract YOLO pose keypoints if available
+                    keypoints_data = None
+                    if hasattr(result, 'keypoints') and result.keypoints is not None:
+                        keypoints_data = result.keypoints.xy.cpu().numpy()
 
                     filtered_boxes, filtered_conf = filter_detections(
                         boxes,
@@ -509,10 +522,21 @@ class VideoActivityAnalyzer:
                         config,
                     )
 
-                    for box, conf in zip(filtered_boxes, filtered_conf):
+                    for i, (box, conf) in enumerate(zip(filtered_boxes, filtered_conf)):
                         best_track_id = self._match_track_id(box, boxes, track_ids)
                         if best_track_id is None:
                             continue
+                            
+                        # Map back to original box index to extract corresponding keypoints
+                        orig_idx = None
+                        for j, orig_box in enumerate(boxes):
+                            if np.array_equal(box, orig_box):
+                                orig_idx = j
+                                break
+                                
+                        person_kpts = None
+                        if keypoints_data is not None and orig_idx is not None and orig_idx < len(keypoints_data):
+                            person_kpts = keypoints_data[orig_idx]
 
                         raw_id = int(best_track_id)
                         active_raw_ids.add(raw_id)
@@ -552,26 +576,28 @@ class VideoActivityAnalyzer:
 
                         self.track_positions[display_id] = (foot_x, foot_y, b_height, frame_number)
 
-                        # Determine if picking product via pose
-                        is_picking = self.pose_estimator.is_picking_product(landmarks)
-
-                        activity = self.recognizer.recognize(
+                        activity_dict = self.recognizer.recognize(
                             frame_number,
                             display_id,
                             foot_x,
                             foot_y,
                             movement_distance,
                             b_height,
-                            is_picking,
+                            person_kpts,
                         )
 
-                        if activity:
-                            timeline.add_event(current_timestamp, display_id, activity)
-                            latest_activity[display_id] = activity
+                        if activity_dict:
+                            act = activity_dict["activity"]
+                            conf_score = activity_dict["confidence"]
+                            rsn = activity_dict["reason"]
+                            timeline.add_event(current_timestamp, display_id, act, conf_score, rsn)
+                            latest_activity[display_id] = act
                             self.recognizer.register_logged_activity(
                                 display_id,
-                                activity,
+                                act,
                             )
+                            # Terminal debug log
+                            print(f"[DEBUG] Time: {current_timestamp} | ID: {display_id} | Zone: (X={foot_x}, Y={foot_y}) | Activity: {act} ({conf_score:.2f}) | Reason: {rsn}")
 
                         label = latest_activity.get(display_id, "Tracking")
                         self._draw_annotation(
@@ -598,16 +624,20 @@ class VideoActivityAnalyzer:
                             frame_number,
                         )
 
-                for exit_frame, display_id, activity in (
+                for exit_frame, display_id, activity_dict in (
                     self.recognizer.update_missing_tracks(
                         active_display_ids,
                         frame_number,
                     )
                 ):
-                    timeline.add_event(current_timestamp, display_id, activity)
+                    act = activity_dict["activity"]
+                    conf_score = activity_dict["confidence"]
+                    rsn = activity_dict["reason"]
+                    timeline.add_event(current_timestamp, display_id, act, conf_score, rsn)
                     latest_activity.pop(display_id, None)
                     self.track_positions.pop(display_id, None)
                     self.identity_manager.purge_raw_id(display_id)
+                    print(f"[DEBUG] Time: {current_timestamp} | ID: {display_id} | Activity: {act} ({conf_score:.2f}) | Reason: {rsn}")
 
                 t4 = time.perf_counter()
                 time_track += (t4 - t3)
@@ -627,11 +657,14 @@ class VideoActivityAnalyzer:
                     avg_write = (time_write / frame_number) * 1000
                     print(f"Progress: {pct:.1f}% | Latency (ms): Read={avg_read:.1f}, OCR={avg_ocr:.1f}, Infer={avg_infer:.1f}, Track={avg_track:.1f}, Write={avg_write:.1f}", flush=True)
 
-            for exit_frame, display_id, activity in self.recognizer.finalize_tracks(
+            for exit_frame, display_id, activity_dict in self.recognizer.finalize_tracks(
                 frame_number
             ):
-                # Pass a generic end timestamp or the last known timestamp
-                timeline.add_event(current_timestamp, display_id, activity)
+                act = activity_dict["activity"]
+                conf_score = activity_dict["confidence"]
+                rsn = activity_dict["reason"]
+                timeline.add_event(current_timestamp, display_id, act, conf_score, rsn)
+                print(f"[DEBUG] Time: {current_timestamp} | ID: {display_id} | Activity: {act} ({conf_score:.2f}) | Reason: {rsn}")
 
         finally:
             if capture is not None:

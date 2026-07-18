@@ -7,7 +7,7 @@ from src.utils import frame_to_time, person_label
 class TimelineGenerator:
     """Write deduplicated activity events to timeline.csv."""
 
-    COLUMNS = ["Timestamp", "Person", "Activity"]
+    COLUMNS = ["Timestamp", "Person", "Activity", "Confidence", "Reason"]
 
     def __init__(self, fps=30, output_path="data/timeline.csv"):
         self.fps = fps if fps > 0 else 30
@@ -30,7 +30,7 @@ class TimelineGenerator:
         self._writer.writerow(self.COLUMNS)
         self._file.flush()
 
-    def add_event(self, timestamp, person_id, activity):
+    def add_event(self, timestamp, person_id, activity, confidence="", reason=""):
         """Add an event only when the activity changes for a person."""
 
         if not activity:
@@ -56,6 +56,8 @@ class TimelineGenerator:
             timestamp,
             person_label(person_id),
             str(activity).strip(),
+            str(confidence),
+            str(reason).strip(),
         ])
         self._file.flush()
 

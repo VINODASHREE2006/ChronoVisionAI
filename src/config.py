@@ -2,8 +2,8 @@
 VIDEO_PATH = "videos/test.mp4"
 
 # Model – YOLO11 with YOLOv8 fallback handled in ensure_model()
-MODEL_PATH = "models/yolo11n.pt"
-MODEL_FALLBACK = "models/yolov8n.pt"
+MODEL_PATH = "models/yolo11n-pose.pt"
+MODEL_FALLBACK = "models/yolov8n-pose.pt"
 
 # Output
 OUTPUT_FOLDER = "outputs"

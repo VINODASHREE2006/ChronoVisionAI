@@ -39,6 +39,12 @@ class CCTVTimestampExtractor:
             results = self.reader.readtext(gray, detail=0)
             
             text = " ".join(results)
+            # OCR Healing: replace common misread characters
+            text = text.replace('Z', '2').replace('z', '2')
+            text = text.replace('O', '0').replace('o', '0')
+            text = text.replace('l', '1').replace('I', '1')
+            text = text.replace('S', '5').replace('s', '5')
+            
             match = self.time_pattern.search(text)
             if match:
                 try:
@@ -61,7 +67,9 @@ class CCTVTimestampExtractor:
             if extracted:
                 self.last_valid_time = extracted
                 self.last_frame_number = frame_number
-                return extracted.strftime("%H:%M:%S")
+                time_str = extracted.strftime("%H:%M:%S")
+                print(f"[OCR] Successfully extracted timestamp: {time_str}")
+                return time_str
             elif self.last_valid_time is None and self.ocr_attempts >= self.max_ocr_attempts:
                 # If we tried 5 times (5 seconds) and never found a timestamp, disable OCR forever!
                 self.disable_ocr = True
