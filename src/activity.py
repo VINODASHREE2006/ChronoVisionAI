@@ -63,6 +63,12 @@ class PersonIdentityManager:
         self.raw_to_display[raw_id] = display_id
         return display_id
 
+    def purge_raw_id(self, display_id):
+        # Remove mapping so if tracker revives the raw_id, it gets a new display_id
+        keys_to_delete = [r_id for r_id, d_id in self.raw_to_display.items() if d_id == display_id]
+        for k in keys_to_delete:
+            del self.raw_to_display[k]
+
     def mark_missing(self, display_id, foot_x, foot_y, box_h, frame_number):
         if display_id is None:
             return
@@ -180,6 +186,7 @@ class ActivityRecognizer:
             self.previous_positions[display_id] = (foot_x, foot_y)
             self.stable_counts[display_id] = config.STABLE_FRAMES
             self.pending_activity[display_id] = "Entered"
+            self.logged_activity.pop(display_id, None)
             self.stationary_frames[display_id] = 0
             self.zone_dwell[display_id] = {}
             self.shelf_dwell[display_id] = 0
@@ -234,13 +241,12 @@ class ActivityRecognizer:
                 self.missing_frames[display_id] >= config.LOST_FRAMES
                 and self.logged_activity.get(display_id) != "Exited"
             ):
-                # We can't know the exact timestamp of exit easily, so we use a fallback placeholder 
-                # or just the current frame timestamp if we track it. For now we just return the frame_number
                 exit_frame = max(1, frame_number - config.LOST_FRAMES)
                 events.append((exit_frame, display_id, "Exited"))
                 self.logged_activity[display_id] = "Exited"
                 self.pending_activity[display_id] = "Exited"
                 self.seen_display_ids.discard(display_id)
+                self.previous_positions.pop(display_id, None)
 
         return events
 
@@ -439,6 +445,7 @@ class VideoActivityAnalyzer:
                 )
 
             frame_number = 0
+            current_timestamp = "00:00:00"
             
             # Profiling accumulators
             time_read = 0.0
@@ -597,10 +604,10 @@ class VideoActivityAnalyzer:
                         frame_number,
                     )
                 ):
-                    # We pass current_timestamp for now, though it might be slightly delayed
                     timeline.add_event(current_timestamp, display_id, activity)
                     latest_activity.pop(display_id, None)
                     self.track_positions.pop(display_id, None)
+                    self.identity_manager.purge_raw_id(display_id)
 
                 t4 = time.perf_counter()
                 time_track += (t4 - t3)
