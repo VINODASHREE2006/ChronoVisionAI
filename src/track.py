@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-from config import *
+from src.config import *
 
 model = YOLO(MODEL_PATH)
 
@@ -9,10 +9,10 @@ results = model.track(
     source=VIDEO_PATH,
     tracker="bytetrack.yaml",
     persist=True,
-    show=True,
+    show=False,
     save=True,
-    classes=[0],      # Person only
-    conf=0.3
+    classes=[0],
+    conf=0.3,
 )
 
 print("✅ Tracking completed!")

@@ -1,35 +1,18 @@
-# zones.py
-
-# Video Resolution
+# Reference resolution used when defining retail zones.
 VIDEO_WIDTH = 3840
 VIDEO_HEIGHT = 2160
 
-# -----------------------------------
-# Entrance / Exit (Bottom Right)
-# -----------------------------------
-ENTRANCE_ZONE = (
-    3000,   # x1
-    1200,   # y1
-    3840,   # x2
-    2160    # y2
-)
+# Entrance / exit door area (bottom-right of frame).
+ENTRANCE_ZONE = (3000, 1200, 3840, 2160)
 
-# -----------------------------------
-# Shelf Browsing Area
-# -----------------------------------
-SHELF_ZONE = (
-    0,      # x1
-    0,      # y1
-    3000,   # x2
-    1700    # y2
-)
+# Main shelf browsing area.
+SHELF_ZONE = (0, 0, 3000, 1700)
 
-# -----------------------------------
-# Exit Zone (Same Door)
-# -----------------------------------
-EXIT_ZONE = (
-    3000,
-    1200,
-    3840,
-    2160
-)
+# Checkout counter area (center-right).
+CHECKOUT_ZONE = (2400, 1400, 3300, 2100)
+
+# Queue/waiting lane in front of checkout.
+QUEUE_ZONE = (2100, 1500, 2500, 2100)
+
+# Exit zone overlaps the entrance door.
+EXIT_ZONE = (3000, 1200, 3840, 2160)

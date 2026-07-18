@@ -1,15 +1,18 @@
 import pandas as pd
 
+from src.utils import normalize_timeline_columns
+
 
 class DashboardAnalytics:
+    """Load and filter timeline data for the Streamlit dashboard."""
 
     def __init__(self, csv_file):
-        self.df = pd.read_csv(csv_file)
+        self.df = normalize_timeline_columns(pd.read_csv(csv_file))
 
     def person_list(self):
-        if "Person ID" in self.df.columns:
+        if "Person" in self.df.columns:
             return ["All"] + sorted(
-                self.df["Person ID"].astype(str).unique().tolist()
+                self.df["Person"].dropna().astype(str).unique().tolist()
             )
         return ["All"]
 
@@ -20,29 +23,35 @@ class DashboardAnalytics:
             )
         return ["All"]
 
-    def filtered_data(self, person="All", activity="All"):
-
+    def filtered_data(self, person="All", activity="All", search=""):
         df = self.df.copy()
 
-        if person != "All" and "Person ID" in df.columns:
-            df = df[df["Person ID"].astype(str) == str(person)]
+        if person != "All" and "Person" in df.columns:
+            df = df[df["Person"].astype(str) == str(person)]
 
         if activity != "All" and "Activity" in df.columns:
             df = df[df["Activity"] == activity]
+
+        if search and len(df):
+            mask = pd.Series(False, index=df.index)
+            for column in ["Timestamp", "Person", "Activity"]:
+                if column in df.columns:
+                    mask = mask | df[column].astype(str).str.contains(
+                        search,
+                        case=False,
+                        na=False,
+                    )
+            df = df[mask]
 
         return df
 
     @property
     def person_col(self):
-        if "Person ID" in self.df.columns:
-            return "Person ID"
-        return None
+        return "Person" if "Person" in self.df.columns else None
 
     @property
     def activity_col(self):
-        if "Activity" in self.df.columns:
-            return "Activity"
-        return None
+        return "Activity" if "Activity" in self.df.columns else None
 
     def total_events(self):
         return len(self.df)

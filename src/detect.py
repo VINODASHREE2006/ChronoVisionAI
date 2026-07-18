@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-from config import *
+from src.config import *
 
 model = YOLO(MODEL_PATH)
 
@@ -8,9 +8,9 @@ model = YOLO(MODEL_PATH)
 results = model.predict(
     source=VIDEO_PATH,
     save=True,
-    show=True,
+    show=False,
     conf=0.3,
-    classes=[0]   # Person class only
+    classes=[0],
 )
 
 print("✅ Person detection completed!")

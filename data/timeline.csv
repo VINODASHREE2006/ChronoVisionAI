@@ -1,120 +1,21 @@
-Time,Person ID,Activity
-00:00:02,2,Entered
-00:00:02,2,Walking
-00:00:02,2,Slow Walking
-00:00:02,2,Walking
-00:00:02,2,Slow Walking
-00:00:02,2,Walking
-00:00:02,2,Slow Walking
-00:00:02,2,Walking
-00:00:02,2,Slow Walking
-00:00:02,2,Standing
-00:00:02,2,Walking
-00:00:02,2,Slow Walking
-00:00:03,2,Walking
-00:00:03,2,Slow Walking
-00:00:03,2,Standing
-00:00:03,2,Slow Walking
-00:00:03,2,Walking
-00:00:03,2,Slow Walking
-00:00:03,2,Walking
-00:00:03,2,Slow Walking
-00:00:03,2,Standing
-00:00:03,2,Slow Walking
-00:00:03,2,Walking
-00:00:03,2,Standing
-00:00:04,2,Slow Walking
-00:00:04,2,Standing
-00:00:05,2,Slow Walking
-00:00:05,2,Standing
-00:00:05,2,Slow Walking
-00:00:05,2,Standing
-00:00:05,2,Slow Walking
-00:00:05,2,Walking
-00:00:05,2,Slow Walking
-00:00:05,2,Standing
-00:00:05,2,Slow Walking
-00:00:05,2,Standing
-00:00:06,2,Slow Walking
-00:00:06,2,Walking
-00:00:06,2,Slow Walking
-00:00:06,2,Walking
-00:00:06,2,Slow Walking
-00:00:06,2,Walking
-00:00:06,2,Slow Walking
-00:00:06,2,Standing
-00:00:06,2,Slow Walking
-00:00:06,2,Standing
-00:00:06,2,Slow Walking
-00:00:06,2,Walking
-00:00:06,2,Slow Walking
-00:00:06,2,Standing
-00:00:06,2,Slow Walking
-00:00:07,2,Walking
-00:00:07,2,Slow Walking
-00:00:07,2,Standing
-00:00:07,2,Slow Walking
-00:00:07,2,Standing
-00:00:07,2,Slow Walking
-00:00:07,2,Standing
-00:00:07,2,Slow Walking
-00:00:07,2,Standing
-00:00:07,2,Slow Walking
-00:00:07,2,Standing
-00:00:07,2,Slow Walking
-00:00:07,2,Standing
-00:00:08,2,Slow Walking
-00:00:08,2,Standing
-00:00:08,2,Slow Walking
-00:00:08,2,Standing
-00:00:08,2,Walking
-00:00:08,2,Slow Walking
-00:00:08,2,Standing
-00:00:08,2,Slow Walking
-00:00:08,2,Standing
-00:00:08,2,Slow Walking
-00:00:08,2,Walking
-00:00:08,2,Slow Walking
-00:00:10,4,Entered
-00:00:10,4,Standing
-00:00:10,4,Walking
-00:00:10,4,Slow Walking
-00:00:10,4,Walking
-00:00:10,4,Slow Walking
-00:00:10,4,Walking
-00:00:10,4,Slow Walking
-00:00:10,4,Standing
-00:00:10,4,Slow Walking
-00:00:10,4,Standing
-00:00:12,4,Slow Walking
-00:00:12,4,Standing
-00:00:12,4,Slow Walking
-00:00:12,4,Standing
-00:00:12,4,Slow Walking
-00:00:12,4,Standing
-00:00:14,4,Slow Walking
-00:00:14,4,Standing
-00:00:14,4,Slow Walking
-00:00:15,6,Entered
-00:00:15,4,Standing
-00:00:15,4,Slow Walking
-00:00:15,4,Standing
-00:00:15,4,Slow Walking
-00:00:15,4,Standing
-00:00:15,4,Slow Walking
-00:00:15,4,Standing
-00:00:15,4,Slow Walking
-00:00:15,4,Standing
-00:00:15,4,Slow Walking
-00:00:15,4,Standing
-00:00:16,4,Slow Walking
-00:00:16,4,Walking
-00:00:16,4,Slow Walking
-00:00:16,4,Walking
-00:00:16,4,Slow Walking
-00:00:16,4,Standing
-00:00:16,4,Slow Walking
-00:00:16,4,Standing
-00:00:18,4,Slow Walking
-00:00:18,4,Standing
-00:00:18,4,Slow Walking
+Timestamp,Person,Activity
+00:00:01,Person 1,Entered
+00:00:02,Person 1,Checkout
+00:00:04,Person 1,Standing
+00:00:08,Person 1,Exited
+00:00:14,Person 4,Entered
+00:00:16,Person 4,Exited
+00:00:27,Person 11,Entered
+00:00:27,Person 11,Standing
+00:00:30,Person 11,Exited
+00:00:40,Person 14,Entered
+00:00:41,Person 14,Shelf Interaction
+00:00:44,Person 15,Entered
+00:00:45,Person 14,Picking Product
+00:00:45,Person 17,Entered
+00:00:45,Person 15,Exited
+00:00:47,Person 23,Entered
+00:00:47,Person 17,Exited
+00:00:47,Person 14,Exited
+00:00:47,Person 23,Standing
+00:00:51,Person 23,Exited

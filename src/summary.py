@@ -1,60 +1,65 @@
 import pandas as pd
 
+from src.utils import normalize_timeline_columns
+
 
 class ActivitySummary:
+    """Generate a human-readable summary from timeline data."""
+
+    MOVEMENT_ACTIVITIES = {
+        "Walking",
+        "Slow Walking",
+        "Running",
+        "Standing",
+        "Waiting",
+        "Idle",
+    }
 
     def __init__(self, csv_file):
-
-        self.df = pd.read_csv(csv_file)
-
-        if "Person ID" in self.df.columns:
-            self.person_col = "Person ID"
-        elif "Person_ID" in self.df.columns:
-            self.person_col = "Person_ID"
-        else:
-            self.person_col = None
-
-        if "Activity" in self.df.columns:
-            self.activity_col = "Activity"
-        elif "Event" in self.df.columns:
-            self.activity_col = "Event"
-        else:
-            self.activity_col = None
-
-        if "Time" in self.df.columns:
-            self.time_col = "Time"
-        else:
-            self.time_col = None
+        self.df = normalize_timeline_columns(pd.read_csv(csv_file))
 
     def generate(self):
+        report = {
+            "Total Events": len(self.df),
+            "Total Persons": 0,
+            "Most Common Activity": "N/A",
+            "Start Time": "N/A",
+            "End Time": "N/A",
+            "Activity Counts": {},
+            "Movement Summary": "No movement data available.",
+        }
 
-        report = {}
+        if "Person" in self.df.columns:
+            report["Total Persons"] = int(self.df["Person"].nunique())
 
-        report["Total Events"] = len(self.df)
-
-        if self.person_col:
-            report["Total Persons"] = self.df[self.person_col].nunique()
-        else:
-            report["Total Persons"] = 0
-
-        if self.activity_col:
-
-            counts = self.df[self.activity_col].value_counts()
-
-            report["Most Common Activity"] = counts.idxmax()
-
+        if "Activity" in self.df.columns and len(self.df):
+            counts = self.df["Activity"].value_counts()
+            report["Most Common Activity"] = str(counts.idxmax())
             report["Activity Counts"] = counts.to_dict()
+            report["Movement Summary"] = self._movement_summary(counts)
 
-        else:
-
-            report["Most Common Activity"] = "N/A"
-            report["Activity Counts"] = {}
-
-        if self.time_col and len(self.df) > 0:
-            report["Start Time"] = self.df[self.time_col].iloc[0]
-            report["End Time"] = self.df[self.time_col].iloc[-1]
-        else:
-            report["Start Time"] = "N/A"
-            report["End Time"] = "N/A"
+        if "Timestamp" in self.df.columns and len(self.df):
+            report["Start Time"] = str(self.df["Timestamp"].iloc[0])
+            report["End Time"] = str(self.df["Timestamp"].iloc[-1])
 
         return report
+
+    def _movement_summary(self, counts):
+        movement_total = sum(
+            int(count)
+            for activity, count in counts.items()
+            if activity in self.MOVEMENT_ACTIVITIES
+        )
+        stationary_total = sum(
+            int(count)
+            for activity, count in counts.items()
+            if activity in {"Standing", "Waiting", "Idle", "Queueing"}
+        )
+
+        if movement_total == 0 and stationary_total == 0:
+            return "No movement events recorded."
+
+        return (
+            f"{movement_total} movement-related events and "
+            f"{stationary_total} stationary events were detected."
+        )

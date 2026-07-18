@@ -1,5 +1,4 @@
 import os
-import glob
 import subprocess
 import sys
 
@@ -8,251 +7,319 @@ import streamlit as st
 from src.dashboard import DashboardAnalytics
 from src.summary import ActivitySummary
 
-# =====================================================
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# ==========================================================
 # PAGE CONFIG
-# =====================================================
+# ==========================================================
 
 st.set_page_config(
     page_title="ChronoVisionAI",
     page_icon="🎥",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# =====================================================
-# TITLE
-# =====================================================
+# ==========================================================
+# CUSTOM CSS
+# ==========================================================
+
+st.markdown(
+    """
+<style>
+
+.block-container{
+    padding-top:2rem;
+    padding-left:2rem;
+    padding-right:2rem;
+}
+
+.stButton>button{
+    width:100%;
+    height:55px;
+    border-radius:12px;
+    font-size:18px;
+    font-weight:bold;
+}
+
+div[data-testid="stMetric"]{
+    background:white;
+    padding:15px;
+    border-radius:12px;
+    box-shadow:0px 2px 8px rgba(0,0,0,.1);
+}
+
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ==========================================================
+# HEADER
+# ==========================================================
 
 st.title("🎥 ChronoVisionAI")
-st.subheader("AI Powered Human Activity Timeline Generator")
-
+st.caption("AI Powered Human Activity Timeline Generator")
 st.divider()
 
-# =====================================================
+# ==========================================================
+# SESSION STATE
+# ==========================================================
+
+if "analysis_complete" not in st.session_state:
+    st.session_state.analysis_complete = False
+
+if "processed_video" not in st.session_state:
+    st.session_state.processed_video = None
+
+if "last_upload_name" not in st.session_state:
+    st.session_state.last_upload_name = None
+
+# ==========================================================
 # VIDEO UPLOAD
-# =====================================================
+# ==========================================================
 
 st.header("📤 Upload CCTV Video")
 
 uploaded_file = st.file_uploader(
-    "Choose CCTV Video",
-    type=["mp4", "avi", "mov"]
+    "Choose a video",
+    type=["mp4", "avi", "mov"],
 )
 
+video_path = None
+
 if uploaded_file is not None:
+    if st.session_state.last_upload_name != uploaded_file.name:
+        st.session_state.analysis_complete = False
+        st.session_state.processed_video = None
+        st.session_state.last_upload_name = uploaded_file.name
 
-    os.makedirs("videos", exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, "videos"), exist_ok=True)
 
-    with open("videos/test.mp4", "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    video_path = os.path.join(PROJECT_ROOT, "videos", uploaded_file.name)
 
-    st.success("✅ Video Uploaded Successfully!")
+    with open(video_path, "wb") as video_file:
+        video_file.write(uploaded_file.getbuffer())
 
-    if st.button("🚀 Process Video"):
+    st.success("✅ Video Uploaded")
+    st.video(video_path)
 
-        with st.spinner("Running YOLOv8 + ByteTrack..."):
+_, center, _ = st.columns([1, 2, 1])
 
+with center:
+    if st.button("🔍 Analyze Video", use_container_width=True):
+        with st.spinner("Analyzing Video..."):
             result = subprocess.run(
-                [sys.executable,"-m", "src.activity"],
+                [
+                    sys.executable,
+                    "-m",
+                    "src.activity",
+                    video_path,
+                ],
                 capture_output=True,
-                text=True
+                text=True,
+                cwd=PROJECT_ROOT,
+                env={
+                    **os.environ,
+                    "KMP_DUPLICATE_LIB_OK": "TRUE",
+                },
             )
 
             if result.returncode == 0:
-                st.success("✅ Processing Completed!")
+                st.success("🎉 Analysis Complete!")
+                st.session_state.analysis_complete = True
+
+                base_name = os.path.splitext(uploaded_file.name)[0]
+                annotated_path = os.path.join(
+                    PROJECT_ROOT,
+                    "outputs",
+                    f"annotated_{base_name}.mp4",
+                )
+                st.session_state.processed_video = (
+                    annotated_path if os.path.exists(annotated_path) else None
+                )
+
+                if result.stdout.strip():
+                    st.code(result.stdout.strip())
             else:
-                st.error(result.stderr)
+                st.session_state.analysis_complete = False
+                error_message = result.stderr.strip() or result.stdout.strip()
+                st.error(error_message or "Video analysis failed.")
 
 st.divider()
 
-# =====================================================
-# MAIN LAYOUT
-# =====================================================
+# ==========================================================
+# DASHBOARD
+# ==========================================================
 
-left_col, right_col = st.columns([2, 1])
-# =====================================================
-# LEFT PANEL
-# =====================================================
+timeline_file = os.path.join(PROJECT_ROOT, "data", "timeline.csv")
 
-with left_col:
+if (
+    uploaded_file is not None
+    and st.session_state.analysis_complete
+    and os.path.exists(timeline_file)
+):
+    dashboard = DashboardAnalytics(timeline_file)
 
-    st.header("🎥 Processed Video")
+    st.header("📊 Analysis Dashboard")
 
-    processed_videos = sorted(
-        glob.glob("runs/track/predict*/test.mp4")
+    # ----------------------------
+    # Filters
+    # ----------------------------
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        selected_person = st.selectbox(
+            "👤 Person",
+            dashboard.person_list(),
+        )
+
+    with col2:
+        selected_activity = st.selectbox(
+            "🏃 Activity",
+            dashboard.activity_list(),
+        )
+
+    with col3:
+        search_query = st.text_input(
+            "🔎 Search",
+            placeholder="Search timestamp, person, or activity",
+        )
+
+    df = dashboard.filtered_data(
+        selected_person,
+        selected_activity,
+        search_query,
     )
 
-    if processed_videos:
+    st.divider()
 
-        latest_video = processed_videos[-1]
+    # ----------------------------
+    # Metrics
+    # ----------------------------
 
-        with open(latest_video, "rb") as video:
-            st.video(video.read())
+    m1, m2 = st.columns(2)
 
-    elif os.path.exists("videos/test.mp4"):
+    with m1:
+        st.metric(
+            "👥 Total Persons",
+            dashboard.total_persons(),
+        )
 
-        with open("videos/test.mp4", "rb") as video:
-            st.video(video.read())
+    with m2:
+        st.metric(
+            "📋 Total Events",
+            len(df),
+        )
 
+    st.divider()
+
+    # ----------------------------
+    # Timeline
+    # ----------------------------
+
+    st.subheader("📅 Activity Timeline")
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        height=450,
+    )
+
+    st.divider()
+
+    # ----------------------------
+    # Activity Chart
+    # ----------------------------
+
+    st.subheader("📈 Activity Distribution")
+
+    counts = dashboard.activity_counts()
+
+    if len(counts):
+        st.bar_chart(counts)
     else:
+        st.info("No activity data available.")
 
-        st.info("Upload a video to begin.")
+    st.divider()
 
-# =====================================================
-# RIGHT PANEL
-# =====================================================
+    # ==========================================================
+    # AI SUMMARY
+    # ==========================================================
 
-with right_col:
+    st.subheader("🤖 AI Summary")
 
-    st.header("📋 Activity Timeline")
+    summary = ActivitySummary(timeline_file)
+    report = summary.generate()
 
-    if os.path.exists("data/timeline.csv"):
-        analytics = DashboardAnalytics("data/timeline.csv")
-        summary = ActivitySummary("data/timeline.csv")
+    c1, c2 = st.columns(2)
 
-        report = summary.generate()
-
-        # ==========================================
-        # FILTERS
-        # ==========================================
-
-        st.subheader("🔍 Search & Filter")
-
-        person = st.selectbox(
-            "Person ID",
-            analytics.person_list()
+    with c1:
+        st.metric(
+            "👥 Total Persons",
+            report["Total Persons"],
         )
 
-        activity = st.selectbox(
-            "Activity",
-            analytics.activity_list()
+        st.metric(
+            "📋 Total Events",
+            report["Total Events"],
         )
 
-        filtered_df = analytics.filtered_data(
-            person,
-            activity
+    with c2:
+        st.metric(
+            "🏃 Most Common Activity",
+            report["Most Common Activity"],
         )
 
-        # ==========================================
-        # TIMELINE
-        # ==========================================
-
-        st.subheader("📝 Timeline")
-
-        st.dataframe(
-            filtered_df,
-            use_container_width=True,
-            height=250
+        st.metric(
+            "⏱ Start Time",
+            report["Start Time"],
         )
 
-        st.divider()
+    c3, c4 = st.columns(2)
 
-        # ==========================================
-        # ANALYTICS
-        # ==========================================
-
-        st.subheader("📊 Analytics")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.metric(
-                "Events",
-                len(filtered_df)
-            )
-
-        with col2:
-
-            if analytics.person_col:
-
-                persons = filtered_df[
-                    analytics.person_col
-                ].nunique()
-
-            else:
-
-                persons = 0
-
-            st.metric(
-                "Persons",
-                persons
-            )
-
-        st.divider()
-
-        # ==========================================
-        # ACTIVITY DISTRIBUTION
-        # ==========================================
-
-        st.subheader("📈 Activity Distribution")
-
-        if analytics.activity_col:
-
-            chart = (
-                filtered_df[
-                    analytics.activity_col
-                ]
-                .value_counts()
-            )
-
-            st.bar_chart(chart)
-
-        else:
-
-            st.info("No activity data available.")
-
-        st.divider()
-        # ==========================================
-        # AI SUMMARY
-        # ==========================================
-
-        st.subheader("🤖 AI Summary")
-
-        st.info(f"""
-### 📹 Video Summary
-
-👥 **Total Persons:** {report['Total Persons']}
-
-📋 **Total Events:** {report['Total Events']}
-
-🚶 **Most Common Activity:** {report['Most Common Activity']}
-
-🕒 **Start Time:** {report['Start Time']}
-
-🕒 **End Time:** {report['End Time']}
-""")
-
-        st.divider()
-
-        # ==========================================
-        # DOWNLOAD CSV
-        # ==========================================
-
-        st.download_button(
-            label="📥 Download Timeline CSV",
-            data=filtered_df.to_csv(index=False),
-            file_name="timeline.csv",
-            mime="text/csv"
+    with c3:
+        st.metric(
+            "⏱ End Time",
+            report["End Time"],
         )
 
+    with c4:
+        st.write("**🚶 Movement Summary**")
+        st.info(report["Movement Summary"])
+
+    st.write("### 📊 Activity Counts")
+    st.json(report["Activity Counts"])
+
+    st.divider()
+
+    # ==========================================================
+    # ANNOTATED VIDEO
+    # ==========================================================
+
+    st.subheader("🎬 Annotated Output Video")
+
+    processed_video = st.session_state.processed_video
+
+    if processed_video and os.path.exists(processed_video):
+        st.video(processed_video)
     else:
+        st.info("Annotated video was not generated for this analysis run.")
 
-        st.warning(
-            "⚠️ No timeline found. Upload and process a video first."
-        )
+    st.divider()
 
-# =====================================================
-# FOOTER
-# =====================================================
+    # ==========================================================
+    # DOWNLOAD
+    # ==========================================================
 
-st.divider()
+    with open(timeline_file, "rb") as timeline_handle:
+        timeline_bytes = timeline_handle.read()
 
-st.markdown(
-    """
-    <div style="text-align:center;padding:10px;">
-        <h3>🎥 ChronoVisionAI</h3>
-        <p><b>AI Powered Human Activity Timeline Generator</b></p>
-        <p>YOLOv8 • ByteTrack • OpenCV • Streamlit</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    st.download_button(
+        "📥 Download Timeline CSV",
+        data=timeline_bytes,
+        file_name="timeline.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )

@@ -1,42 +1,40 @@
 import csv
 import os
 
-from src.utils import frame_to_time
+from src.utils import frame_to_time, person_label
 
 
 class TimelineGenerator:
+    """Write deduplicated activity events to timeline.csv."""
 
-    def __init__(self, fps=30):
+    COLUMNS = ["Timestamp", "Person", "Activity"]
 
-        self.fps = fps
+    def __init__(self, fps=30, output_path="data/timeline.csv"):
+        self.fps = fps if fps > 0 else 30
+        self.file_path = output_path
+        self.last_activity = {}
+        self._file = None
+        self._writer = None
+        self._open_file()
 
-        os.makedirs("data", exist_ok=True)
+    def _open_file(self):
+        os.makedirs(os.path.dirname(self.file_path) or ".", exist_ok=True)
 
-        self.file_path = "data/timeline.csv"
-
-        self.file = open(
+        self._file = open(
             self.file_path,
             "w",
             newline="",
-            encoding="utf-8"
+            encoding="utf-8",
         )
-
-        self.writer = csv.writer(self.file)
-
-        # CSV Header
-        self.writer.writerow([
-            "Time",
-            "Person ID",
-            "Activity"
-        ])
-
-        # Store last activity of each person
-        self.last_activity = {}
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(self.COLUMNS)
+        self._file.flush()
 
     def add_event(self, frame, person_id, activity):
-        """
-        Add an event only if the activity changed.
-        """
+        """Add an event only when the activity changes for a person."""
+
+        if not activity:
+            return
 
         if (
             person_id in self.last_activity
@@ -46,18 +44,25 @@ class TimelineGenerator:
 
         self.last_activity[person_id] = activity
 
-        timestamp = frame_to_time(frame, self.fps)
-
-        self.writer.writerow([
-            timestamp,
-            person_id,
-            activity
+        self._writer.writerow([
+            frame_to_time(frame, self.fps),
+            person_label(person_id),
+            activity,
         ])
-
-        # Save immediately
-        self.file.flush()
+        self._file.flush()
 
     def close(self):
+        """Close the CSV file handle safely."""
 
-        if not self.file.closed:
-            self.file.close()
+        if self._file and not self._file.closed:
+            self._file.flush()
+            self._file.close()
+            self._file = None
+            self._writer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False

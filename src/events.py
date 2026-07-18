@@ -1,7 +1,7 @@
 import csv
 from ultralytics import YOLO
 
-from config import *
+from src.config import *
 
 model = YOLO(MODEL_PATH)
 
